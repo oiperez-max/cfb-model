@@ -1,0 +1,82 @@
+name: Refresh and publish
+
+on:
+  schedule:
+    # 09:00 UTC every Tuesday = 3am Edmonton. Lines for the coming week are up,
+    # last week's results are final.
+    - cron: "0 9 * * 2"
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season to build"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths: ["web/**", "scripts/**", ".github/workflows/refresh.yml"]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Work out the season
+        id: season
+        run: |
+          if [ -n "${{ github.event.inputs.season }}" ]; then
+            echo "year=${{ github.event.inputs.season }}" >> "$GITHUB_OUTPUT"
+          else
+            M=$(date -u +%m); Y=$(date -u +%Y)
+            if [ "$M" -lt 7 ]; then Y=$((Y-1)); fi
+            echo "year=$Y" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch ESPN (FPI, schedule, odds)
+        run: python scripts/fetch_espn.py ${{ steps.season.outputs.year }}
+
+      - name: Fetch CFBD advanced stats
+        continue-on-error: true
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+        run: |
+          if [ -z "$CFBD_API_KEY" ]; then
+            echo "No CFBD_API_KEY secret set. Using the bundled 2025 snapshot."
+            exit 0
+          fi
+          Y=${{ steps.season.outputs.year }}
+          python scripts/fetch_cfbd.py $((Y-1)) $Y || echo "CFBD pull failed, falling back to cached stats"
+
+      - name: Build the site
+        run: python scripts/build_site.py ${{ steps.season.outputs.year }}
+
+      - name: Sanity check the output
+        run: python scripts/verify.py
+
+      - name: Commit refreshed data
+        run: |
+          git config user.name "cfb-model bot"
+          git config user.email "actions@github.com"
+          git add data site
+          git diff --staged --quiet || git commit -m "refresh $(date -u +%Y-%m-%d)"
+          git push || echo "nothing to push"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
