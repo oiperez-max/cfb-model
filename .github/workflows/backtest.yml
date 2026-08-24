@@ -1,0 +1,57 @@
+name: Backtest
+
+# Walk-forward test of the model against closing lines. Slow (a few hundred
+# CFBD calls the first time), so it runs on demand and monthly, not weekly.
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "First season"
+        required: false
+        default: "2015"
+      end:
+        description: "Last season"
+        required: false
+        default: "2025"
+  schedule:
+    - cron: "0 10 1 * *"
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore CFBD snapshot cache
+        uses: actions/cache@v4
+        with:
+          path: data/cache
+          key: cfbd-cache-${{ github.event.inputs.start || '2015' }}-${{ github.event.inputs.end || '2025' }}
+          restore-keys: cfbd-cache-
+
+      - name: Run the backtest
+        env:
+          CFBD_API_KEY: ${{ secrets.CFBD_API_KEY }}
+        run: |
+          if [ -z "$CFBD_API_KEY" ]; then
+            echo "::error::CFBD_API_KEY secret is not set. Add it in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          python scripts/backtest.py "${{ github.event.inputs.start || '2015' }}" "${{ github.event.inputs.end || '2025' }}"
+
+      - name: Show the result in the run summary
+        run: cat BACKTEST.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the report
+        run: |
+          git config user.name "cfb-model bot"
+          git config user.email "actions@github.com"
+          git add BACKTEST.md data/backtest_summary.json
+          git diff --staged --quiet || git commit -m "backtest $(date -u +%Y-%m-%d)"
+          git push || echo "nothing to push"
